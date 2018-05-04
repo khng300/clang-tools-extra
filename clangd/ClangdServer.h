@@ -18,6 +18,7 @@
 #include "Protocol.h"
 #include "TUScheduler.h"
 #include "index/FileIndex.h"
+#include "index/LevelDBIndex.h"
 #include "clang/Tooling/CompilationDatabase.h"
 #include "clang/Tooling/Core/Replacement.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
@@ -77,8 +78,15 @@ public:
     /// opened files and uses the index to augment code completion results.
     bool BuildDynamicSymbolIndex = false;
 
+    /// If true, ClangdServer builds a dynamic on-disk index for symbols in
+    /// opened files and uses the index to augment code completion results.
+    bool BuildDynamicOnDiskIndex = false;
+
     /// If set, use this index to augment code completion results.
     SymbolIndex *StaticIndex = nullptr;
+
+    /// If set, build on-disk index.
+    LevelDBIndex *OnDiskIndex = nullptr;
 
     /// The resource directory is used to find internal headers, overriding
     /// defaults and -resource-dir compiler flag).
@@ -243,6 +251,8 @@ private:
   SymbolIndex *Index;
   // If present, an up-to-date of symbols in open files. Read via Index.
   std::unique_ptr<FileIndex> FileIdx;
+  // If present, an up-to-date of symbols in open files. Read via Index.
+  LevelDBIndex *OnDiskIdx;
   // If present, a merged view of FileIdx and an external index. Read via Index.
   std::unique_ptr<SymbolIndex> MergedIndex;
   // If set, this represents the workspace path.

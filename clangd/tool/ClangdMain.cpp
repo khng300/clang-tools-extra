@@ -24,6 +24,9 @@
 #include <string>
 #include <thread>
 
+#include <signal.h>
+#include <unistd.h>
+
 using namespace clang;
 using namespace clang::clangd;
 
@@ -134,6 +137,11 @@ static llvm::cl::opt<Path> YamlSymbolFile(
         "eventually. Don't rely on it."),
     llvm::cl::init(""), llvm::cl::Hidden);
 
+static llvm::cl::opt<Path>
+    LevelDBPath("leveldb-path",
+                llvm::cl::desc("Path to LevelDB storing indice."),
+                llvm::cl::init(""));
+
 int main(int argc, char *argv[]) {
   llvm::sys::PrintStackTraceOnErrorSignal(argv[0]);
   llvm::cl::ParseCommandLineOptions(argc, argv, "clangd");
@@ -220,11 +228,21 @@ int main(int argc, char *argv[]) {
   }
   if (!ResourceDir.empty())
     Opts.ResourceDir = ResourceDir;
-  Opts.BuildDynamicSymbolIndex = EnableIndex;
+  Opts.BuildDynamicOnDiskIndex = EnableIndex;
   std::unique_ptr<SymbolIndex> StaticIdx;
+  std::unique_ptr<LevelDBIndex> LevelDBIdx;
   if (EnableIndex && !YamlSymbolFile.empty()) {
     StaticIdx = BuildStaticIndex(YamlSymbolFile);
     Opts.StaticIndex = StaticIdx.get();
+  }
+  if (EnableIndex && !LevelDBPath.empty()) {
+    LevelDBIdx.reset(new LevelDBIndex());
+    if (!LevelDBIdx->open(LevelDBPath)) {
+      llvm::errs() << "Failed to open LevelDB database `"
+                   << LevelDBPath << "`\n";
+      return 1;
+    }
+    Opts.OnDiskIndex = LevelDBIdx.get();
   }
   Opts.AsyncThreadsCount = WorkerThreadsCount;
 

@@ -1,3 +1,6 @@
+include_directories (${LEVELDB_INCLUDE_DIR})
+
+find_package(LevelDB REQUIRED)
 set(LLVM_LINK_COMPONENTS
   Support
   )
@@ -36,6 +39,8 @@ add_clang_library(clangDaemon
   XRefs.cpp
   index/CanonicalIncludes.cpp
   index/FileIndex.cpp
+  index/LevelDBIndex.cpp
+  index/multiple-store.cpp
   index/Index.cpp
   index/MemIndex.cpp
   index/Merge.cpp
@@ -57,6 +62,7 @@ add_clang_library(clangDaemon
   clangToolingRefactor
   ${LLVM_PTHREAD_LIB}
   ${CLANGD_ATOMIC_LIB}
+  ${LEVELDB_LIBRARIES}
   )
 
 if( LLVM_LIB_FUZZING_ENGINE OR LLVM_USE_SANITIZE_COVERAGE )

@@ -86,6 +86,7 @@ ClangdServer::ClangdServer(GlobalCompilationDatabase &CDB,
                                         : getStandardResourceDir()),
       DiagConsumer(DiagConsumer), FSProvider(FSProvider),
       FileIdx(Opts.BuildDynamicSymbolIndex ? new FileIndex() : nullptr),
+      OnDiskIdx(Opts.BuildDynamicOnDiskIndex ? Opts.OnDiskIndex : nullptr),
       PCHs(std::make_shared<PCHContainerOperations>()),
       // Pass a callback into `WorkScheduler` to extract symbols from a newly
       // parsed file and rebuild the file index synchronously each time an AST
@@ -93,15 +94,24 @@ ClangdServer::ClangdServer(GlobalCompilationDatabase &CDB,
       // FIXME(ioeric): this can be slow and we may be able to index on less
       // critical paths.
       WorkScheduler(Opts.AsyncThreadsCount, Opts.StorePreamblesInMemory,
-                    FileIdx
+                    Opts.OnDiskIndex
+                        ? [this](PathRef Path,
+                                 ParsedAST *AST) { OnDiskIdx->update(Path, AST); }
+                        :
+                    (FileIdx
                         ? [this](PathRef Path,
                                  ParsedAST *AST) { FileIdx->update(Path, AST); }
-                        : ASTParsedCallback(),
+                        : ASTParsedCallback()),
                     Opts.UpdateDebounce) {
-  if (FileIdx && Opts.StaticIndex) {
+  if (OnDiskIdx && Opts.StaticIndex) {
+    MergedIndex = mergeIndex(OnDiskIdx, Opts.StaticIndex);
+    Index = MergedIndex.get();
+  } else if (FileIdx && Opts.StaticIndex) {
     MergedIndex = mergeIndex(FileIdx.get(), Opts.StaticIndex);
     Index = MergedIndex.get();
-  } else if (FileIdx)
+  } else if (OnDiskIdx)
+    Index = OnDiskIdx;
+  else if (FileIdx)
     Index = FileIdx.get();
   else if (Opts.StaticIndex)
     Index = Opts.StaticIndex;
@@ -359,7 +369,10 @@ void ClangdServer::findDefinitions(PathRef File, Position Pos,
                                 llvm::Expected<InputsAndAST> InpAST) {
     if (!InpAST)
       return CB(InpAST.takeError());
-    CB(clangd::findDefinitions(InpAST->AST, Pos, this->FileIdx.get()));
+    if (OnDiskIdx)
+      CB(clangd::findDefinitions(InpAST->AST, Pos, this->OnDiskIdx));
+    else
+      CB(clangd::findDefinitions(InpAST->AST, Pos, this->FileIdx.get()));
   };
 
   WorkScheduler.runWithAST("Definitions", File, Bind(Action, std::move(CB)));
