@@ -187,6 +187,10 @@ static llvm::cl::opt<Path> IndexFile(
         "eventually. Don't rely on it."),
     llvm::cl::init(""), llvm::cl::Hidden);
 
+static llvm::cl::opt<bool>
+    DatabaseIndex("databaseindex", llvm::cl::desc("Persistent index on disk."),
+                  llvm::cl::init(true));
+
 static llvm::cl::opt<bool> EnableBackgroundIndex(
     "background-index",
     llvm::cl::desc(
@@ -446,17 +450,20 @@ int main(int argc, char *argv[]) {
   Opts.BackgroundIndexRebuildPeriodMs = BackgroundIndexRebuildPeriod;
   std::unique_ptr<SymbolIndex> StaticIdx;
   std::future<void> AsyncIndexLoad; // Block exit while loading the index.
-  if (EnableIndex && !IndexFile.empty()) {
-    // Load the index asynchronously. Meanwhile SwapIndex returns no results.
+  if (EnableIndex) {
     SwapIndex *Placeholder;
     StaticIdx.reset(Placeholder = new SwapIndex(llvm::make_unique<MemIndex>()));
-    AsyncIndexLoad = runAsync<void>([Placeholder] {
-      if (auto Idx = loadIndex(IndexFile, /*UseDex=*/true))
-        Placeholder->reset(std::move(Idx));
-    });
-    if (RunSynchronously)
-      AsyncIndexLoad.wait();
+    if (!IndexFile.empty()) {
+      // Load the index asynchronously. Meanwhile SwapIndex returns no results.
+      AsyncIndexLoad = runAsync<void>([Placeholder] {
+        if (auto Idx = loadIndex(IndexFile, /*UseDex=*/true))
+          Placeholder->reset(std::move(Idx));
+      });
+      if (RunSynchronously)
+        AsyncIndexLoad.wait();
+    }
   }
+  Opts.DatabaseIndex = DatabaseIndex;
   Opts.StaticIndex = StaticIdx.get();
   Opts.AsyncThreadsCount = WorkerThreadsCount;
 

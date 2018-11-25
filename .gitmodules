@@ -1,0 +1,3 @@
+[submodule "clangd/index/databasestorage/lmdb"]
+	path = clangd/index/databasestorage/lmdb
+	url = https://github.com/khng300/lmdb

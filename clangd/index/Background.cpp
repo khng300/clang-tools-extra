@@ -136,7 +136,7 @@ BackgroundIndex::BackgroundIndex(
     Context BackgroundContext, const FileSystemProvider &FSProvider,
     const GlobalCompilationDatabase &CDB,
     BackgroundIndexStorage::Factory IndexStorageFactory,
-    size_t BuildIndexPeriodMs, size_t ThreadPoolSize)
+    bool EnableDatabaseIndex, size_t BuildIndexPeriodMs, size_t ThreadPoolSize)
     : SwapIndex(llvm::make_unique<MemIndex>()), FSProvider(FSProvider),
       CDB(CDB), BackgroundContext(std::move(BackgroundContext)),
       BuildIndexPeriodMs(BuildIndexPeriodMs),
@@ -157,6 +157,27 @@ BackgroundIndex::BackgroundIndex(
         BuildIndexPeriodMs);
     ThreadPool.runAsync("background-index-builder", [this] { buildIndex(); });
   }
+
+  if (!EnableDatabaseIndex)
+    return;
+
+  llvm::SmallString<128> DBIndexPath;
+  llvm::sys::path::append(DBIndexPath, ".clangd", "dbindex");
+  std::error_code OK;
+  std::error_code EC = llvm::sys::fs::create_directories(DBIndexPath);
+  if (EC != OK) {
+    elog("Failed to create directory {0} for index storage: {1}", DBIndexPath,
+         EC.message());
+    return;
+  }
+  if (auto Idx = dbindex::LMDBIndex::open(DBIndexPath))
+    DiskIndex = std::move(Idx);
+  else {
+    llvm::errs() << "Warning: failed to open index database `" << DBIndexPath
+                 << "` .\n";
+    return;
+  }
+  reset(llvm::make_unique<dbindex::LMDBSymbolIndex>(DiskIndex.get()));
 }
 
 BackgroundIndex::~BackgroundIndex() {
@@ -353,11 +374,14 @@ void BackgroundIndex::update(llvm::StringRef MainFile, IndexFileIn Index,
       if (!DigestIt.second && DigestIt.first->second == Hash)
         continue;
       DigestIt.first->second = Hash;
-      // This can override a newer version that is added in another thread, if
-      // this thread sees the older version but finishes later. This should be
-      // rare in practice.
-      IndexedSymbols.update(Path, std::move(SS), std::move(RS),
-                            Path == MainFile);
+      if (!DiskIndex)
+        // This can override a newer version that is added in another thread, if
+        // this thread sees the older version but finishes later. This should be
+        // rare in practice.
+        IndexedSymbols.update(Path, std::move(SS), std::move(RS),
+                              Path == MainFile);
+      else
+        llvm::consumeError(DiskIndex->update(Path, Hash, SS.get(), RS.get()));
     }
   }
 }
@@ -376,15 +400,17 @@ void BackgroundIndex::buildIndex() {
     }
     if (!SymbolsUpdatedSinceLastIndex.exchange(false))
       continue;
-    // There can be symbol update right after the flag is reset above and before
-    // index is rebuilt below. The new index would contain the updated symbols
-    // but the flag would still be true. This is fine as we would simply run an
-    // extra index build.
-    reset(
-        IndexedSymbols.buildIndex(IndexType::Heavy, DuplicateHandling::Merge));
-    log("BackgroundIndex: rebuilt symbol index with estimated memory {0} "
-        "bytes.",
-        estimateMemoryUsage());
+    if (!DiskIndex) {
+      // There can be symbol update right after the flag is reset above and
+      // before index is rebuilt below. The new index would contain the updated
+      // symbols but the flag would still be true. This is fine as we would
+      // simply run an extra index build.
+      reset(IndexedSymbols.buildIndex(IndexType::Heavy,
+                                      DuplicateHandling::Merge));
+      log("BackgroundIndex: rebuilt symbol index with estimated memory {0} "
+          "bytes.",
+          estimateMemoryUsage());
+    }
   }
 }
 
@@ -396,8 +422,18 @@ llvm::Error BackgroundIndex::index(tooling::CompileCommand Cmd,
 
   auto FS = FSProvider.getFileSystem();
   auto Buf = FS->getBufferForFile(AbsolutePath);
-  if (!Buf)
+  if (!Buf) {
+#if 1
+    llvm::SmallString<128> Normalized(AbsolutePath);
+    llvm::sys::path::native(Normalized);
+    AbsolutePath = Normalized.str();
+#endif
+    log("File {0} does not exist. Removing its index.", AbsolutePath);
+    if (auto Err = DiskIndex->update(AbsolutePath, {}, nullptr, nullptr))
+      elog("Removing index for file `{0}` failed with error: {1}", AbsolutePath,
+           Err);
     return llvm::errorCodeToError(Buf.getError());
+  }
   auto Hash = digest(Buf->get()->getBuffer());
 
   // Take a snapshot of the digests to avoid locking for each file in the TU.
@@ -465,7 +501,7 @@ llvm::Error BackgroundIndex::index(tooling::CompileCommand Cmd,
 
   if (BuildIndexPeriodMs > 0)
     SymbolsUpdatedSinceLastIndex = true;
-  else
+  else if (!DiskIndex)
     reset(
         IndexedSymbols.buildIndex(IndexType::Light, DuplicateHandling::Merge));
 
@@ -492,6 +528,11 @@ BackgroundIndex::loadShard(const tooling::CompileCommand &Cmd,
   std::vector<Source> Dependencies;
   std::queue<Source> ToVisit;
   std::string AbsolutePath = getAbsolutePath(Cmd).str();
+#if 1
+  llvm::SmallString<128> Normalized(AbsolutePath);
+  llvm::sys::path::native(Normalized);
+  AbsolutePath = Normalized.str();
+#endif
   // Up until we load the shard related to a dependency it needs to be
   // re-indexed.
   ToVisit.emplace(AbsolutePath, true);
@@ -552,8 +593,10 @@ BackgroundIndex::loadShard(const tooling::CompileCommand &Cmd,
         continue;
       }
       // If digests match then dependency doesn't need re-indexing.
+      auto Digest = digest(Buf->get()->getBuffer());
+      auto DigestInDBIndex = DiskIndex->getFileDigest(CurDependency.Path);
       CurDependency.NeedsReIndexing =
-          digest(Buf->get()->getBuffer()) != I.getValue().Digest;
+          Digest != I.getValue().Digest || Digest != DigestInDBIndex;
     }
   }
   // Load shard information into background-index.
@@ -571,8 +614,9 @@ BackgroundIndex::loadShard(const tooling::CompileCommand &Cmd,
                     ? llvm::make_unique<RefSlab>(std::move(*SI.Shard->Refs))
                     : nullptr;
       IndexedFileDigests[SI.AbsolutePath] = SI.Digest;
-      IndexedSymbols.update(SI.AbsolutePath, std::move(SS), std::move(RS),
-                            SI.CountReferences);
+      if (!DiskIndex)
+        IndexedSymbols.update(SI.AbsolutePath, std::move(SS), std::move(RS),
+                              SI.CountReferences);
     }
   }
 
@@ -615,10 +659,13 @@ BackgroundIndex::loadShards(std::vector<std::string> ChangedFiles) {
     }
   }
   vlog("Loaded all shards");
-  reset(IndexedSymbols.buildIndex(IndexType::Heavy, DuplicateHandling::Merge));
-  vlog("BackgroundIndex: built symbol index with estimated memory {0} "
-       "bytes.",
-       estimateMemoryUsage());
+  if (!DiskIndex) {
+    reset(
+        IndexedSymbols.buildIndex(IndexType::Heavy, DuplicateHandling::Merge));
+    vlog("BackgroundIndex: built symbol index with estimated memory {0} "
+         "bytes.",
+         estimateMemoryUsage());
+  }
   return NeedsReIndexing;
 }
 

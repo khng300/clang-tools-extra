@@ -33,6 +33,8 @@ if(NOT HAVE_CXX_ATOMICS64_WITHOUT_LIB)
   list(APPEND CLANGD_ATOMIC_LIB "atomic")
 endif()
 
+set(LMDB_INCLUDE_DIRS index/databasestorage/lmdb/libraries/liblmdb)
+
 add_clang_library(clangDaemon
   AST.cpp
   Cancellation.cpp
@@ -92,6 +94,15 @@ add_clang_library(clangDaemon
 
   refactor/Rename.cpp
   refactor/Tweak.cpp
+
+  index/databasestorage/lmdb/libraries/liblmdb/mdb.c
+  index/databasestorage/lmdb/libraries/liblmdb/midl.c
+  index/databasestorage/RecordID.cpp
+  index/databasestorage/lmdb-cxx.cpp
+  index/databasestorage/DatabaseStorage.cpp
+  index/databasestorage/DBTrigram.cpp
+  index/databasestorage/RecordIDIterator.cpp
+  index/databasestorage/RecordIDPostingList.cpp
 
   LINK_LIBS
   clangAST
