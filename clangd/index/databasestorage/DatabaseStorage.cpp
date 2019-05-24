@@ -90,8 +90,10 @@ const char *LMDBIndex::DB_RECORDS = "Records";
 const char *LMDBIndex::DB_FILEPATH_INFO = "File Path Information";
 const char *LMDBIndex::DB_FILEID_TO_SYMBOL_RECS = "FileID to Symbol records";
 const char *LMDBIndex::DB_FILEID_TO_REF_RECS = "FileID to Ref records";
+const char *LMDBIndex::DB_SYMBOLID_TO_SYMBOL_RECS =
+    "SymbolID to Symbol records";
+const char *LMDBIndex::DB_SYMBOLID_TO_REF_RECS = "SymbolID to Ref records";
 const char *LMDBIndex::DB_SYMBOLID_TO_SYMBOLS = "SymbolID to Symbols";
-const char *LMDBIndex::DB_SYMBOLID_TO_REFS = "SymbolID to Refs";
 const char *LMDBIndex::DB_TRIGRAM_TO_SYMBOLID = "Trigram to SymbolID";
 const char *LMDBIndex::DB_SCOPE_TO_SYMBOLID = "Scope to SymbolID";
 
@@ -404,8 +406,8 @@ std::unique_ptr<LMDBIndex> LMDBIndex::open(PathRef Path) {
   auto Err = Env->setMapsize(1ull << 39);
   if (llvm::errorToBool(std::move(Err)))
     return nullptr;
-  // Now we need 9 databases for our use including 1 allocator
-  Err = Env->setMaxDBs(9);
+  // Now we need 10 databases for our use including 1 allocator
+  Err = Env->setMaxDBs(10);
   if (llvm::errorToBool(std::move(Err)))
     return nullptr;
   // No metasync during open as we do not need durability
@@ -441,13 +443,17 @@ std::unique_ptr<LMDBIndex> LMDBIndex::open(PathRef Path) {
                       MDB_CREATE | MDB_DUPSORT | MDB_INTEGERDUP);
   if (llvm::errorToBool(DBIFileIDToRefRecs.takeError()))
     return nullptr;
-  llvm::Expected<lmdb::DBI> DBISymbolIDToSymbols = lmdb::DBI::open(
-      *Txn, LMDBIndex::DB_SYMBOLID_TO_SYMBOLS, MDB_CREATE | MDB_DUPSORT);
-  if (llvm::errorToBool(DBISymbolIDToSymbols.takeError()))
+  llvm::Expected<lmdb::DBI> DBISymbolIDToSymbolRecords = lmdb::DBI::open(
+      *Txn, LMDBIndex::DB_SYMBOLID_TO_SYMBOL_RECS, MDB_CREATE | MDB_DUPSORT);
+  if (llvm::errorToBool(DBISymbolIDToSymbolRecords.takeError()))
     return nullptr;
-  llvm::Expected<lmdb::DBI> DBISymbolIDToRefs = lmdb::DBI::open(
-      *Txn, LMDBIndex::DB_SYMBOLID_TO_REFS, MDB_CREATE | MDB_DUPSORT);
-  if (llvm::errorToBool(DBISymbolIDToRefs.takeError()))
+  llvm::Expected<lmdb::DBI> DBISymbolIDToRefRecords = lmdb::DBI::open(
+      *Txn, LMDBIndex::DB_SYMBOLID_TO_REF_RECS, MDB_CREATE | MDB_DUPSORT);
+  if (llvm::errorToBool(DBISymbolIDToRefRecords.takeError()))
+    return nullptr;
+  llvm::Expected<lmdb::DBI> DBISymbolIDToSymbols =
+      lmdb::DBI::open(*Txn, LMDBIndex::DB_SYMBOLID_TO_SYMBOLS, MDB_CREATE);
+  if (llvm::errorToBool(DBISymbolIDToSymbols.takeError()))
     return nullptr;
   llvm::Expected<lmdb::DBI> DBITrigramToSymbolID = lmdb::DBI::open(
       *Txn, LMDBIndex::DB_TRIGRAM_TO_SYMBOLID, MDB_CREATE | MDB_DUPSORT);
@@ -470,8 +476,10 @@ std::unique_ptr<LMDBIndex> LMDBIndex::open(PathRef Path) {
   LMDBIndexPtr->DBIFilePathToFileInfo = std::move(*DBIFilePathToFileInfo);
   LMDBIndexPtr->DBIFileIDToSymbolRecs = std::move(*DBIFileIDToSymbolRecs);
   LMDBIndexPtr->DBIFileIDToRefRecs = std::move(*DBIFileIDToRefRecs);
+  LMDBIndexPtr->DBISymbolIDToSymbolRecords =
+      std::move(*DBISymbolIDToSymbolRecords);
+  LMDBIndexPtr->DBISymbolIDToRefRecords = std::move(*DBISymbolIDToRefRecords);
   LMDBIndexPtr->DBISymbolIDToSymbols = std::move(*DBISymbolIDToSymbols);
-  LMDBIndexPtr->DBISymbolIDToRefs = std::move(*DBISymbolIDToRefs);
   LMDBIndexPtr->DBITrigramToSymbolID = std::move(*DBITrigramToSymbolID);
   LMDBIndexPtr->DBIScopeToSymbolID = std::move(*DBIScopeToSymbolID);
   return LMDBIndexPtr;
@@ -567,6 +575,7 @@ llvm::Expected<llvm::ArrayRef<uint8_t>> LMDBIndex::getRecord(lmdb::Txn &Txn,
 
 llvm::Error LMDBIndex::updateFile(llvm::StringRef FilePath, FileDigest Digest,
                                   const SymbolSlab *SS, const RefSlab *RS) {
+  llvm::DenseSet<SymbolID> TouchedSyms;
   lmdb::Txn Txn;
   {
     auto Expected = lmdb::Txn::begin(DBEnv);
@@ -574,7 +583,8 @@ llvm::Error LMDBIndex::updateFile(llvm::StringRef FilePath, FileDigest Digest,
       return Expected.takeError();
     Txn = std::move(*Expected);
   }
-  auto RemoveSymbols = [this, &Txn](RecordID FileID) -> llvm::Error {
+  auto RemoveSymbols = [this, &Txn,
+                        &TouchedSyms](RecordID FileID) -> llvm::Error {
     llvm::Error E2 = llvm::Error::success();
     llvm::consumeError(std::move(E2));
     // Delete all the \p SS related to this file
@@ -601,50 +611,11 @@ llvm::Error LMDBIndex::updateFile(llvm::StringRef FilePath, FileDigest Digest,
               if (E2)
                 return false;
               // Delete SymbolID -> Symbol RecordID associations
-              lmdb::Cursor Cursor;
-              {
-                auto Expected = lmdb::Cursor::open(Txn, DBISymbolIDToSymbols);
-                E2 = Expected.takeError();
-                if (E2)
-                  return false;
-                Cursor = std::move(*Expected);
-              }
-              lmdb::Val K = ID.raw(), V = &RecID;
-              E2 = Cursor.get(K, V, MDB_GET_BOTH);
+              E2 = DBISymbolIDToSymbolRecords.del(Txn, ID.raw(), {&RecID});
               if (E2)
                 return false;
-              E2 = Cursor.del();
-              if (E2)
-                return false;
-              // Check if the SymbolID still exists. If it does not, remove the
-              // inverted index and scope index related to this symbol
-              bool SymIDFound = true;
-              E2 = llvm::handleErrors(
-                  Cursor.set(ID.raw()),
-                  [&SymIDFound](
-                      std::unique_ptr<lmdb::DBError> ErrorInfo) -> llvm::Error {
-                    if (ErrorInfo->returnCode() != MDB_NOTFOUND)
-                      return llvm::Error(std::move(ErrorInfo));
-                    SymIDFound = false;
-                    return llvm::Error::success();
-                  });
-              if (E2)
-                return false;
-              if (!SymIDFound) {
-                // The symbol no longer exists, so clear up the trigram inverted
-                // index and scope index
-                std::vector<Token> Trigrams = generateIdentifierTrigrams(Name);
-                for (auto &I : Trigrams) {
-                  E2 = DBITrigramToSymbolID.del(Txn, I.Data, {ID.raw()});
-                  if (E2)
-                    return false;
-                }
-                if (Scope.size()) {
-                  E2 = DBIScopeToSymbolID.del(Txn, Scope, {ID.raw()});
-                  if (E2)
-                    return false;
-                }
-              }
+
+              TouchedSyms.insert(ID);
               return true;
             }))
       return Err;
@@ -679,7 +650,7 @@ llvm::Error LMDBIndex::updateFile(llvm::StringRef FilePath, FileDigest Digest,
               if (E2)
                 return false;
               // Delete SymbolID -> SymbolID:Ref RecordID associations
-              E2 = DBISymbolIDToRefs.del(Txn, ID.raw(), {&RecID});
+              E2 = DBISymbolIDToRefRecords.del(Txn, ID.raw(), {&RecID});
               if (E2)
                 return false;
               return true;
@@ -698,51 +669,22 @@ llvm::Error LMDBIndex::updateFile(llvm::StringRef FilePath, FileDigest Digest,
       return Err;
     return llvm::Error::success();
   };
-  auto AddSymbol = [this, &Txn](RecordID FileID,
-                                const SymbolSlab *SS) -> llvm::Error {
+  auto AddSymbol = [this, &Txn, &TouchedSyms](
+                       RecordID FileID, const SymbolSlab *SS) -> llvm::Error {
     for (auto &I : *SS) {
       auto RecID =
           addRecord(Txn, llvm::arrayRefFromStringRef(serializeSymbol(I)));
       if (!RecID)
         return RecID.takeError();
       // Insert SymbolID to Symbol RecordID association
-      auto Err = DBISymbolIDToSymbols.put(Txn, I.ID.raw(), &*RecID, 0);
+      auto Err = DBISymbolIDToSymbolRecords.put(Txn, I.ID.raw(), &*RecID, 0);
       if (Err)
         return Err;
       // Insert FileID to Symbol RecordID association
       Err = DBIFileIDToSymbolRecs.put(Txn, &FileID, &*RecID, 0);
       if (Err)
         return Err;
-      // Generate trigram tokens corresponding to the unqualified name of
-      // the symbol. Then, insert trigram tokens to SymbolID associations.
-      lmdb::Val V;
-      std::vector<Token> Trigrams = generateIdentifierTrigrams(I.Name);
-      for (auto &TI : Trigrams) {
-        V = I.ID.raw();
-        Err = llvm::handleErrors(
-            DBITrigramToSymbolID.put(Txn, TI.Data, V, MDB_NODUPDATA),
-            [](std::unique_ptr<lmdb::DBError> ErrorInfo) -> llvm::Error {
-              if (ErrorInfo->returnCode() != MDB_KEYEXIST)
-                return llvm::Error(std::move(ErrorInfo));
-              return llvm::Error::success();
-            });
-        if (Err)
-          return Err;
-      }
-      V = I.ID.raw();
-      if (I.Scope.size()) {
-        // In case the symbol has parent scope, insert unqualified name to
-        // qualified name association.
-        Err = llvm::handleErrors(
-            DBIScopeToSymbolID.put(Txn, I.Scope, V, MDB_NODUPDATA),
-            [](std::unique_ptr<lmdb::DBError> ErrorInfo) -> llvm::Error {
-              if (ErrorInfo->returnCode() != MDB_KEYEXIST)
-                return llvm::Error(std::move(ErrorInfo));
-              return llvm::Error::success();
-            });
-        if (Err)
-          return Err;
-      }
+      TouchedSyms.insert(I.ID);
     }
     return llvm::Error::success();
   };
@@ -758,7 +700,7 @@ llvm::Error LMDBIndex::updateFile(llvm::StringRef FilePath, FileDigest Digest,
     for (auto &I : *RS) {
       lmdb::Cursor SIDCursor;
       {
-        auto Expected = lmdb::Cursor::open(Txn, DBISymbolIDToRefs);
+        auto Expected = lmdb::Cursor::open(Txn, DBISymbolIDToRefRecords);
         if (!Expected)
           return Expected.takeError();
         SIDCursor = std::move(*Expected);
@@ -779,6 +721,60 @@ llvm::Error LMDBIndex::updateFile(llvm::StringRef FilePath, FileDigest Digest,
       }
     }
     return llvm::Error::success();
+  };
+  auto RemoveSymbolFromStore = [this, &Txn](SymbolID ID) -> llvm::Error {
+    lmdb::Val V;
+    auto Err = DBISymbolIDToSymbols.get(Txn, ID.raw(), V);
+    if (Err)
+      return Err;
+    Symbol S = deserializeSymbol(V);
+    std::vector<Token> Trigrams = generateIdentifierTrigrams(S.Name);
+    // Remove trigram tokens corresponding to the Symbol
+    for (auto &I : Trigrams) {
+      Err = DBITrigramToSymbolID.del(Txn, I.Data, {ID.raw()});
+      if (Err)
+        return Err;
+    }
+    if (S.Scope.size()) {
+      // In case the Symbol has scope, remove scope tokens corresponding to the
+      // Symbol
+      Err = DBIScopeToSymbolID.del(Txn, S.Scope, {ID.raw()});
+      if (Err)
+        return Err;
+    }
+    // Remove the corresponding Symbol from Symbols database
+    return DBISymbolIDToSymbols.del(Txn, ID.raw(), llvm::None);
+  };
+  auto UpdateSymbolToStore = [this, &Txn](Symbol &S) -> llvm::Error {
+    // Generate trigram tokens corresponding to the unqualified name of
+    // the symbol. Then, insert trigram tokens to SymbolID associations.
+    std::vector<Token> Trigrams = generateIdentifierTrigrams(S.Name);
+    for (auto &TI : Trigrams) {
+      auto Err = llvm::handleErrors(
+          DBITrigramToSymbolID.put(Txn, TI.Data, S.ID.raw(), MDB_NODUPDATA),
+          [](std::unique_ptr<lmdb::DBError> ErrorInfo) -> llvm::Error {
+            if (ErrorInfo->returnCode() != MDB_KEYEXIST)
+              return llvm::Error(std::move(ErrorInfo));
+            return llvm::Error::success();
+          });
+      if (Err)
+        return Err;
+    }
+    if (S.Scope.size()) {
+      // In case the symbol has parent scope, insert unqualified name to
+      // qualified name association.
+      auto Err = llvm::handleErrors(
+          DBIScopeToSymbolID.put(Txn, S.Scope, S.ID.raw(), MDB_NODUPDATA),
+          [](std::unique_ptr<lmdb::DBError> ErrorInfo) -> llvm::Error {
+            if (ErrorInfo->returnCode() != MDB_KEYEXIST)
+              return llvm::Error(std::move(ErrorInfo));
+            return llvm::Error::success();
+          });
+      if (Err)
+        return Err;
+    }
+    // Update the corresponding Symbol in Symbols database
+    return DBISymbolIDToSymbols.put(Txn, S.ID.raw(), serializeSymbol(S), 0);
   };
 
   // Current we use hashed \p FilePath as file ID.
@@ -849,6 +845,59 @@ llvm::Error LMDBIndex::updateFile(llvm::StringRef FilePath, FileDigest Digest,
     if (auto Err = AddRefs(*FileID, RS))
       return Err;
 
+  // Iterate the touched Symbols and see whether the corresponding Symbol in
+  // Symbols database should be updated or removed
+  for (auto &I : TouchedSyms) {
+    lmdb::Cursor Cursor;
+    {
+      auto Expected = lmdb::Cursor::open(Txn, DBISymbolIDToSymbolRecords);
+      if (auto Err = Expected.takeError())
+        return Err;
+      Cursor = std::move(*Expected);
+    }
+
+    llvm::BumpPtrAllocator MemPool;
+    llvm::StringSaver Strings(MemPool);
+    llvm::Error E2 = llvm::Error::success();
+    llvm::consumeError(std::move(E2));
+
+    // Check if the SymbolID still exists. If it does not, remove the
+    // inverted index and scope index related to this symbol. If it does,
+    // merge the symbol records corresponding to the same SymbolID to provide
+    // a Symbol for query.
+
+    llvm::Optional<Symbol> Sym;
+    if (auto Err = Cursor.foreachKey(
+            I.raw(), [&](const lmdb::Val &, const lmdb::Val &V) {
+              auto RecID = *V.data<RecordID>();
+              auto Data = getRecord(Txn, RecID);
+              if (!Data) {
+                E2 = Data.takeError();
+                return lmdb::IteratorControl::Stop;
+              }
+              Symbol S = deserializeSymbol(llvm::toStringRef(*Data));
+              OwnSymbol(S, Strings);
+              if (!Sym)
+                Sym = S;
+              else
+                Sym = mergeSymbol(*Sym, S);
+              return lmdb::IteratorControl::Continue;
+            }))
+      return Err;
+    if (E2)
+      return E2;
+    if (!Sym) {
+      // No Symbol records corresponding to given SymbolID exists, so clean up
+      // the trigram inverted index and scope index
+      if (auto Err = RemoveSymbolFromStore(I))
+        return Err;
+    } else {
+      // Update the Symbol in Symbols database
+      if (auto Err = UpdateSymbolToStore(*Sym))
+        return Err;
+    }
+  }
+
   // Insert the generated FileInfo into records database
   std::string FIStream = serializeFileInfo(FI);
   if (auto Err =
@@ -861,40 +910,12 @@ llvm::Error LMDBIndex::updateFile(llvm::StringRef FilePath, FileDigest Digest,
 
 llvm::Optional<Symbol> LMDBIndex::GetSymbol(lmdb::Txn &Txn, SymbolID ID,
                                             llvm::StringSaver &Strings) {
-  llvm::Optional<Symbol> Sym;
-
-  // Look up all RecordIDs representing the symbol
-  llvm::SmallVector<RecordID, 4> Vec;
-  auto Err = foreachRecordsUnderKey(
-      Txn, DBISymbolIDToSymbols, llvm::arrayRefFromStringRef(ID.raw()),
-      [&](const lmdb::Val &RecIDData) -> bool {
-        Vec.emplace_back(*RecIDData.data<RecordID>());
-        return true;
-      });
-  if (Err) {
-    llvm::consumeError(std::move(Err));
-    return {};
-  }
-
-  // Read all the SS from records database and merge them.
-  //
-  // We better own the SS, although for LMDB under RO transaction no
-  // one is going to make modifications to the database.
-  for (auto RecID : Vec) {
-    auto Data = getRecord(Txn, RecID);
-    if (!Data) {
-      llvm::consumeError(Data.takeError());
-      return {};
-    }
-    Symbol S = deserializeSymbol(llvm::toStringRef(*Data));
-    OwnSymbol(S, Strings);
-    if (!Sym)
-      Sym = S;
-    else
-      Sym = mergeSymbol(*Sym, S);
-  }
-
-  return Sym;
+  lmdb::Val V;
+  if (llvm::errorToBool(DBISymbolIDToSymbols.get(Txn, ID.raw(), V)))
+    return llvm::None;
+  Symbol S = deserializeSymbol(V);
+  OwnSymbol(S, Strings);
+  return S;
 };
 
 bool LMDBSymbolIndex::fuzzyFind(
@@ -1035,7 +1056,8 @@ void LMDBSymbolIndex::refs(
   for (auto &ID : Req.IDs) {
     // Look up all RecordIDs containing Ref for the SymbolID
     auto Err = foreachRecordsUnderKey(
-        Txn, DBIndex->DBISymbolIDToRefs, llvm::arrayRefFromStringRef(ID.raw()),
+        Txn, DBIndex->DBISymbolIDToRefRecords,
+        llvm::arrayRefFromStringRef(ID.raw()),
         [&](const lmdb::Val &RecIDData) -> bool {
           auto SymbolData =
               DBIndex->getRecord(Txn, *RecIDData.data<RecordID>());

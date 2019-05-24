@@ -30,8 +30,9 @@ class LMDBIndex {
   static const char *DB_FILEPATH_INFO;
   static const char *DB_FILEID_TO_SYMBOL_RECS;
   static const char *DB_FILEID_TO_REF_RECS;
+  static const char *DB_SYMBOLID_TO_SYMBOL_RECS;
+  static const char *DB_SYMBOLID_TO_REF_RECS;
   static const char *DB_SYMBOLID_TO_SYMBOLS;
-  static const char *DB_SYMBOLID_TO_REFS;
   static const char *DB_TRIGRAM_TO_SYMBOLID;
   static const char *DB_SCOPE_TO_SYMBOLID;
 
@@ -84,8 +85,9 @@ private:
   lmdb::DBI DBIFilePathToFileInfo;
   lmdb::DBI DBIFileIDToSymbolRecs;
   lmdb::DBI DBIFileIDToRefRecs;
+  lmdb::DBI DBISymbolIDToSymbolRecords;
+  lmdb::DBI DBISymbolIDToRefRecords;
   lmdb::DBI DBISymbolIDToSymbols;
-  lmdb::DBI DBISymbolIDToRefs;
   lmdb::DBI DBITrigramToSymbolID;
   lmdb::DBI DBIScopeToSymbolID;
 };
