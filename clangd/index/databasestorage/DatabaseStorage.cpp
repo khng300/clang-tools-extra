@@ -526,8 +526,9 @@ llvm::Error LMDBIndex::update(llvm::StringRef FilePath, FileDigest Digest,
   const auto TimerStop = std::chrono::high_resolution_clock::now();
   const auto Duration = std::chrono::duration_cast<std::chrono::milliseconds>(
       TimerStop - TimerStart);
-  log("Update of {0} took {1}ms. Error: {2}.\n", FilePath, Duration.count(),
-      Err);
+  log("Update of {0} took {1}. Error: {2}. Indexed ({3} symbols, {4} "
+      "refs)\n",
+      FilePath, Duration, Err, SS->size(), RS->numRefs());
   return Err;
 }
 
