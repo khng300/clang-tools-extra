@@ -146,7 +146,6 @@ BackgroundIndex::BackgroundIndex(
     BackgroundIndexStorage::Factory IndexStorageFactory, size_t ThreadPoolSize)
     : SwapIndex(llvm::make_unique<MemIndex>()), FSProvider(FSProvider),
       CDB(CDB), BackgroundContext(std::move(BackgroundContext)),
-      Rebuilder(this, &IndexedSymbols, ThreadPoolSize),
       IndexStorageFactory(std::move(IndexStorageFactory)),
       CommandsChanged(
           CDB.watch([&](const std::vector<std::string> &ChangedFiles) {
@@ -157,7 +156,7 @@ BackgroundIndex::BackgroundIndex(
   for (unsigned I = 0; I < ThreadPoolSize; ++I) {
     ThreadPool.runAsync("background-worker-" + llvm::Twine(I + 1), [this] {
       WithContext Ctx(this->BackgroundContext.clone());
-      Queue.work([&] { Rebuilder.idle(); });
+      Queue.work([&] { });
     });
   }
 }
@@ -336,12 +335,6 @@ void BackgroundIndex::update(
         continue;
       SV.Digest = Hash;
       SV.HadErrors = HadErrors;
-
-      // This can override a newer version that is added in another thread, if
-      // this thread sees the older version but finishes later. This should be
-      // rare in practice.
-      IndexedSymbols.update(Path, std::move(SS), std::move(RS), std::move(RelS),
-                            Path == MainFile);
     }
   }
 }
@@ -442,7 +435,6 @@ llvm::Error BackgroundIndex::index(tooling::CompileCommand Cmd) {
   }
   update(AbsolutePath, std::move(Index), ShardVersionsSnapshot, HadErrors);
 
-  Rebuilder.indexedTU();
   return llvm::Error::success();
 }
 
@@ -453,7 +445,6 @@ std::vector<tooling::CompileCommand>
 BackgroundIndex::loadProject(std::vector<std::string> MainFiles) {
   std::vector<tooling::CompileCommand> NeedsReIndexing;
 
-  Rebuilder.startLoading();
   // Load shards for all of the mainfiles.
   const std::vector<LoadedShard> Result =
       loadIndexShards(MainFiles, IndexStorageFactory, CDB);
@@ -479,13 +470,8 @@ BackgroundIndex::loadProject(std::vector<std::string> MainFiles) {
       SV.Digest = LS.Digest;
       SV.HadErrors = LS.HadErrors;
       ++LoadedShards;
-
-      IndexedSymbols.update(LS.AbsolutePath, std::move(SS), std::move(RS),
-                            std::move(RelS), LS.CountReferences);
     }
   }
-  Rebuilder.loadedShard(LoadedShards);
-  Rebuilder.doneLoading();
 
   auto FS = FSProvider.getFileSystem();
   llvm::DenseSet<PathRef> TUsToIndex;

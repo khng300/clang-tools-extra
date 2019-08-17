@@ -123,6 +123,37 @@ public:
   }
 };
 
+// Persist shards in IndexDB
+class IndexDBBackedIndexStorage : public BackgroundIndexStorage {
+public:
+  std::shared_ptr<dbindex::LMDBIndex> DB;
+
+public:
+  // Sets DiskShardRoot to (Directory + ".clangd/index/") which is the base
+  // directory for all shard files.
+  IndexDBBackedIndexStorage(std::shared_ptr<dbindex::LMDBIndex> DB) : DB(DB) {}
+
+  std::unique_ptr<IndexFileIn>
+  loadShard(llvm::StringRef ShardIdentifier) const override {
+    if (!DB)
+      return nullptr;
+    auto I = DB->get(ShardIdentifier);
+    if (!I) {
+      elog("Error while reading shard {0}: {1}", ShardIdentifier,
+           I.takeError());
+      return nullptr;
+    }
+    return llvm::make_unique<IndexFileIn>(std::move(*I));
+  }
+
+  llvm::Error storeShard(llvm::StringRef ShardIdentifier,
+                         IndexFileOut Shard) const override {
+    if (!DB)
+      return llvm::Error::success();
+    return DB->update(ShardIdentifier, Shard);
+  }
+};
+
 // Creates and owns IndexStorages for multiple CDBs.
 class DiskBackedIndexStorageManager {
 public:
@@ -164,12 +195,61 @@ private:
   std::function<llvm::Optional<ProjectInfo>(PathRef)> GetProjectInfo;
 };
 
+// Creates and owns IndexStorages for multiple CDBs.
+class IndexDBBackedIndexStorageManager {
+public:
+  IndexDBBackedIndexStorageManager(
+      std::function<llvm::Optional<ProjectInfo>(PathRef)> GetProjectInfo,
+      std::unique_ptr<dbindex::LMDBSymbolIndex> &Index)
+      : IndexStorage(llvm::make_unique<NullStorage>()),
+        GetProjectInfo(std::move(GetProjectInfo)) {
+    std::string IndexDBRoot;
+    {
+      llvm::SmallString<128> Path;
+      llvm::sys::fs::current_path(Path);
+      llvm::sys::path::append(Path, ".clangd", "IndexDB");
+      IndexDBRoot = Path.str();
+    }
+    std::error_code OK;
+    std::error_code EC = llvm::sys::fs::create_directories(IndexDBRoot, true);
+    if (EC != OK) {
+      elog("Failed to create directory {0} for IndexDB storage: {1}",
+           IndexDBRoot, EC.message());
+      return;
+    }
+    DB = dbindex::LMDBIndex::open(IndexDBRoot);
+    if (!DB) {
+      elog("Error while opening database {0}", IndexDBRoot);
+      return;
+    }
+    IndexStorage = llvm::make_unique<IndexDBBackedIndexStorage>(DB);
+    Index = llvm::make_unique<dbindex::LMDBSymbolIndex>(DB);
+  }
+
+  // Creates or fetches to storage from cache for the specified project.
+  BackgroundIndexStorage *operator()(PathRef File) {
+    return IndexStorage.get();
+  }
+
+private:
+  std::shared_ptr<dbindex::LMDBIndex> DB;
+  std::unique_ptr<BackgroundIndexStorage> IndexStorage;
+  std::function<llvm::Optional<ProjectInfo>(PathRef)> GetProjectInfo;
+};
+
 } // namespace
 
 BackgroundIndexStorage::Factory
 BackgroundIndexStorage::createDiskBackedStorageFactory(
     std::function<llvm::Optional<ProjectInfo>(PathRef)> GetProjectInfo) {
   return DiskBackedIndexStorageManager(std::move(GetProjectInfo));
+}
+
+BackgroundIndexStorage::Factory
+BackgroundIndexStorage::createIndexDBBackedStorageFactory(
+    std::function<llvm::Optional<ProjectInfo>(PathRef)> GetProjectInfo,
+    std::unique_ptr<dbindex::LMDBSymbolIndex> &Index) {
+  return IndexDBBackedIndexStorageManager(std::move(GetProjectInfo), Index);
 }
 
 } // namespace clangd

@@ -19,6 +19,7 @@
 #include "index/FileIndex.h"
 #include "index/Index.h"
 #include "index/Serialization.h"
+#include "index/index-db/DatabaseStorage.h"
 #include "clang/Tooling/CompilationDatabase.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/Threading.h"
@@ -61,6 +62,10 @@ public:
   // user's home directory if none was found, e.g. standard library headers.
   static Factory createDiskBackedStorageFactory(
       std::function<llvm::Optional<ProjectInfo>(PathRef)> GetProjectInfo);
+
+  static Factory createIndexDBBackedStorageFactory(
+      std::function<llvm::Optional<ProjectInfo>(PathRef)> GetProjectInfo,
+      std::unique_ptr<dbindex::LMDBSymbolIndex> &Index);
 };
 
 // A priority queue of tasks which can be run on (external) worker threads.
@@ -137,10 +142,7 @@ public:
 
   // Cause background threads to stop after ther current task, any remaining
   // tasks will be discarded.
-  void stop() {
-    Rebuilder.shutdown();
-    Queue.stop();
-  }
+  void stop() { Queue.stop(); }
 
   // Wait until the queue is empty, to allow deterministic testing.
   LLVM_NODISCARD bool
@@ -169,8 +171,6 @@ private:
 
   llvm::Error index(tooling::CompileCommand);
 
-  FileSymbols IndexedSymbols;
-  BackgroundIndexRebuilder Rebuilder;
   llvm::StringMap<ShardVersion> ShardVersions; // Key is absolute file path.
   std::mutex ShardVersionsMu;
 

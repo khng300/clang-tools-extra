@@ -98,6 +98,16 @@ add_clang_library(clangDaemon
   index/dex/PostingList.cpp
   index/dex/Trigram.cpp
 
+  index/index-db/lmdb/libraries/liblmdb/mdb.c
+  index/index-db/lmdb/libraries/liblmdb/midl.c
+  index/index-db/RecordID.cpp
+  index/index-db/lmdb-cxx.cpp
+  index/index-db/DatabaseStorage.cpp
+  index/index-db/DBTrigram.cpp
+  index/index-db/RecordIDIterator.cpp
+  index/index-db/RecordIDPostingList.cpp
+  index/index-db/Container.cpp
+
   refactor/Rename.cpp
   refactor/Tweak.cpp
 

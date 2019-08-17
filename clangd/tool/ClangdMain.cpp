@@ -372,6 +372,13 @@ opt<bool> PrettyPrint{
     init(false),
 };
 
+opt<bool> DebugOnStart{
+    "debug-on-start",
+    cat(Features),
+    desc("Trigger breakpoint on start"),
+    init(false),
+};
+
 /// \brief Supports a test URI scheme with relaxed constraints for lit tests.
 /// The path in a test URI will be combined with a platform-specific fake
 /// directory to form an absolute path. For example, test:///a.cpp is resolved
@@ -665,6 +672,8 @@ clangd accepts flags on the commandline, and in the CLANGD_FLAGS environment var
       /*UseDirBasedCDB=*/CompileArgsFrom == FilesystemCompileArgs,
       OffsetEncodingFromFlag, Opts);
   llvm::set_thread_name("clangd.main");
+  if (DebugOnStart)
+    LLVM_BUILTIN_DEBUGTRAP;
   return LSPServer.run() ? 0
                          : static_cast<int>(ErrorResultCode::NoShutdownRequest);
 }
