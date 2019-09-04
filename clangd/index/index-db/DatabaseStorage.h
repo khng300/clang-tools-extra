@@ -65,7 +65,7 @@ class LMDBIndex {
   static const char *DB_SYMBOLID_TO_RELATION_RECS;
   static const char *DB_SYMBOLID_TO_SYMBOLS;
   static const char *DB_TRIGRAM_TO_SYMBOLID;
-  static const char *DB_SCOPE_TO_SYMBOLID;
+  static const char *DB_SCOPEDIGEST_TO_SYMBOLID;
 
   /// \brief Friends
   friend class LMDBSymbolIndex;
@@ -108,7 +108,7 @@ private:
   lmdb::DBI DBISymbolIDToRelationShards;
   lmdb::DBI DBISymbolIDToSymbols;
   lmdb::DBI DBITrigramToSymbolID;
-  lmdb::DBI DBIScopeToSymbolID;
+  lmdb::DBI DBIScopeDigestToSymbolID;
 };
 
 /// \brief SymbolIndex interface exported from Indexing database

@@ -97,7 +97,8 @@ const char *LMDBIndex::DB_SYMBOLID_TO_RELATION_RECS =
     "INDEXDB.SYMBOLID_RELATIONS";
 const char *LMDBIndex::DB_SYMBOLID_TO_SYMBOLS = "INDEXDB.SYMBOLID_SYMBOLS";
 const char *LMDBIndex::DB_TRIGRAM_TO_SYMBOLID = "INDEXDB.TRIGRAM_SYMBOLID";
-const char *LMDBIndex::DB_SCOPE_TO_SYMBOLID = "INDEXDB.SCOPE_SYMBOLID";
+const char *LMDBIndex::DB_SCOPEDIGEST_TO_SYMBOLID =
+    "INDEXDB.SCOPEDIGEST_SYMBOLID";
 
 /// Hash Subject-Predicate
 static FileDigest makeSubjectPredicateDigest(SymbolID Subject,
@@ -175,9 +176,9 @@ std::unique_ptr<LMDBIndex> LMDBIndex::open(PathRef Path) {
       *Txn, LMDBIndex::DB_TRIGRAM_TO_SYMBOLID, MDB_CREATE | MDB_DUPSORT);
   if (!DBITrigramToSymbolID)
     return nullptr;
-  llvm::ErrorOr<lmdb::DBI> DBIScopeToSymbolID = lmdb::DBI::open(
-      *Txn, LMDBIndex::DB_SCOPE_TO_SYMBOLID, MDB_CREATE | MDB_DUPSORT);
-  if (!DBIScopeToSymbolID)
+  llvm::ErrorOr<lmdb::DBI> DBIScopeDigestToSymbolID = lmdb::DBI::open(
+      *Txn, LMDBIndex::DB_SCOPEDIGEST_TO_SYMBOLID, MDB_CREATE | MDB_DUPSORT);
+  if (!DBIScopeDigestToSymbolID)
     return nullptr;
 
   // Commit the changes to storage in one go
@@ -195,7 +196,7 @@ std::unique_ptr<LMDBIndex> LMDBIndex::open(PathRef Path) {
       std::move(*DBISymbolIDToRelationShards);
   LMDBIndexPtr->DBISymbolIDToSymbols = std::move(*DBISymbolIDToSymbols);
   LMDBIndexPtr->DBITrigramToSymbolID = std::move(*DBITrigramToSymbolID);
-  LMDBIndexPtr->DBIScopeToSymbolID = std::move(*DBIScopeToSymbolID);
+  LMDBIndexPtr->DBIScopeDigestToSymbolID = std::move(*DBIScopeDigestToSymbolID);
   return LMDBIndexPtr;
 }
 
@@ -245,7 +246,8 @@ llvm::Error LMDBIndex::removeSymbolFromStore(lmdb::Txn &Txn, SymbolID ID) {
   if (S.Scope.size()) {
     // In case the Symbol has scope, remove scope tokens corresponding to
     // the Symbol
-    Err = DBIScopeToSymbolID.del(Txn, S.Scope, {ID.raw()});
+    Err = DBIScopeDigestToSymbolID.del(Txn, llvm::toStringRef(digest(S.Scope)),
+                                       {ID.raw()});
     if (Err)
       return llvm::make_error<LMDBIndexError>(LMDBIndexError::DB_ERROR);
   }
@@ -277,7 +279,8 @@ llvm::Error LMDBIndex::updateSymbolToStore(lmdb::Txn &Txn, Symbol &S) {
     if (S.Scope.size()) {
       // In case the symbol has parent scope, insert unqualified name to
       // qualified name association.
-      Err = DBIScopeToSymbolID.put(Txn, S.Scope, S.ID.raw(), MDB_NODUPDATA);
+      Err = DBIScopeDigestToSymbolID.put(
+          Txn, llvm::toStringRef(digest(S.Scope)), S.ID.raw(), MDB_NODUPDATA);
       if (Err && Err != lmdb::makeErrorCode(MDB_KEYEXIST))
         return llvm::make_error<LMDBIndexError>(LMDBIndexError::DB_ERROR);
     }
@@ -514,11 +517,11 @@ bool LMDBSymbolIndex::fuzzyFind(
   std::vector<std::unique_ptr<Iterator>> ScopeIterators;
   for (const auto &I : Req.Scopes) {
     llvm::ErrorOr<lmdb::Cursor> Cursor =
-        lmdb::Cursor::open(*Txn, DBIndex->DBIScopeToSymbolID);
+        lmdb::Cursor::open(*Txn, DBIndex->DBIScopeDigestToSymbolID);
     if (!Cursor)
       return false;
     std::vector<DocID> SymbolIDs;
-    if (Cursor->foreachKey(I,
+    if (Cursor->foreachKey(llvm::toStringRef(digest(I)),
                            [&SymbolIDs](const lmdb::Val &, const lmdb::Val &V) {
                              SymbolIDs.push_back(*V.data<DocID>());
                              return lmdb::IteratorControl::Continue;
