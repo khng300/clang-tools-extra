@@ -397,7 +397,7 @@ llvm::Error LMDBIndex::updateFile(llvm::StringRef FilePath,
     }
   }
   if (Shard.Relations) {
-    // Insert Subject:Predicate -> hashed ShardIdentifier mappings
+    // Insert hashed Subject:Predicate -> hashed ShardIdentifier mappings
     for (auto &R : *Shard.Relations) {
       auto SPDigest = makeSubjectPredicateDigest(R.Subject, R.Predicate);
       if (DBISymbolIDToRelationShards.put(*Txn, llvm::toStringRef(SPDigest),
